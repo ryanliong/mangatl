@@ -1,0 +1,9 @@
+samples/
+vendor/
+*-translated/
+.venv/
+__pycache__/
+logs/
+.DS_Store
+MangaTL.app/
+.gui_settings.json

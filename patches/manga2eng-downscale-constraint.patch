@@ -1,0 +1,16 @@
+diff --git a/manga_translator/rendering/__init__.py b/manga_translator/rendering/__init__.py
+index fa9264a..c64a77e 100644
+--- a/manga_translator/rendering/__init__.py
++++ b/manga_translator/rendering/__init__.py
+@@ -417,7 +417,10 @@ async def dispatch_eng_render(img_canvas: np.ndarray, original_img: np.ndarray,
+         font_path = os.path.join(BASE_PATH, 'fonts/comic shanns 2.ttf')
+     text_render.set_font(font_path)
+ 
+-    return render_textblock_list_eng(img_canvas, text_regions, line_spacing=line_spacing, size_tol=1.2, original_img=original_img, downscale_constraint=0.8,disable_font_border=disable_font_border)
++    return render_textblock_list_eng(img_canvas, text_regions, line_spacing=line_spacing, size_tol=1.2, original_img=original_img,
++        # mangatl patch: was 0.8, which can't shrink English enough to fit bubbles sized for vertical Japanese.
++        downscale_constraint=float(os.environ.get('MANGATL_DOWNSCALE_CONSTRAINT', '0.3')),
++        disable_font_border=disable_font_border)
+ 
+ async def dispatch_eng_render_pillow(img_canvas: np.ndarray, original_img: np.ndarray, text_regions: List[TextBlock], font_path: str = '', line_spacing: int = 0, disable_font_border: bool = False) -> np.ndarray:
+     if len(text_regions) == 0:

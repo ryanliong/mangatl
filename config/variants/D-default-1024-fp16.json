@@ -1,0 +1,24 @@
+{
+  "translator": {
+    "translator": "custom_openai",
+    "target_lang": "ENG",
+    "gpt_config": "config/gpt_config.yaml"
+  },
+  "detector": {
+    "detector": "default"
+  },
+  "ocr": {
+    "ocr": "mocr",
+    "use_mocr_merge": true
+  },
+  "inpainter": {
+    "inpainter": "default",
+    "inpainting_size": 1024,
+    "inpainting_precision": "fp16"
+  },
+  "render": {
+    "renderer": "manga2eng",
+    "alignment": "center",
+    "font_size_minimum": 10
+  }
+}

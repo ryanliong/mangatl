@@ -1,0 +1,17 @@
+diff --git a/manga_translator/utils/panel/lib/page.py b/manga_translator/utils/panel/lib/page.py
+index 4e31488..3b1d868 100644
+--- a/manga_translator/utils/panel/lib/page.py
++++ b/manga_translator/utils/panel/lib/page.py
+@@ -156,10 +156,8 @@ class Page:
+ 				break
+ 
+ 			for dline in dlines[0]:
+-				x0 = int(round(dline[0][0]))
+-				y0 = int(round(dline[0][1]))
+-				x1 = int(round(dline[0][2]))
+-				y1 = int(round(dline[0][3]))
++				# mangatl patch: OpenCV 5 returns (N, 4) lines; OpenCV 4 returned (N, 1, 4).
++				x0, y0, x1, y1 = (int(round(v)) for v in np.asarray(dline).reshape(-1)[:4])
+ 
+ 				a = x0 - x1
+ 				b = y0 - y1

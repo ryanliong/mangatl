@@ -1,0 +1,4 @@
+# Read by manga-image-translator's custom_openai translator (top-level key "ollama").
+ollama:
+  temperature: 0.3
+  top_p: 0.9

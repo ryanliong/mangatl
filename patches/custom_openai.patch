@@ -1,0 +1,147 @@
+diff --git a/manga_translator/translators/custom_openai.py b/manga_translator/translators/custom_openai.py
+index 14e7491..8fd941e 100644
+--- a/manga_translator/translators/custom_openai.py
++++ b/manga_translator/translators/custom_openai.py
+@@ -1,3 +1,5 @@
++import json
++import os
+ import re
+ 
+ from ..config import TranslatorConfig
+@@ -167,6 +169,17 @@ class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
+             # Use regex to extract response 
+             response=self.extract_capture_groups(response, rf"{self.rgx_capture}")
+ 
++            # mangatl patch: pull out the context lines so they don't end up in the last bubble.
++            if self._mangatl_enabled():
++                st = self._mangatl_state()
++                for m in re.finditer(r'<\|names\|>(.*)', response):
++                    if m.group(1).strip().strip('"').lower() not in ('', 'none'):
++                        self._mangatl_parse_names(m.group(1), st['names'])
++                m = re.search(r'<\|summary\|>(.*)', response)
++                if m and m.group(1).strip():
++                    st['summary'] = m.group(1).strip()[:600]
++                response = re.sub(r'<\|(?:names|summary)\|>.*', '', response).rstrip()
++
+ 
+             # Sometimes it will return line like "<|9>demo", and we need to fix it.
+             def add_pipe(match):
+@@ -209,13 +222,106 @@ class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
+             if "I'm sorry, but I can't assist with that request" in t:
+                 raise Exception('translations contain error text')
+         self.logger.debug(translations)
++        if self._mangatl_enabled():
++            st = self._mangatl_state()
++            st['prev'] = list(zip(queries, translations))
++            st['pages'] += 1
++            self._mangatl_save()
++            self.logger.info(f"[context] after page {st['pages']}: names = " + '; '.join(f'{k}={v}' for k, v in st['names'].items()))
++            self.logger.info(f"[context] summary = {st['summary']}")
+         if self.token_count_last:
+             self.logger.info(f'Used {self.token_count_last} tokens (Total: {self.token_count})')
+ 
+         return translations
+ 
++    # --- mangatl patch: rolling chapter context ---------------------------------------------------------------
++    # Each page's request carries the names used so far, a short story summary (refreshed every
++    # MANGATL_SUMMARY_EVERY pages) and the previous page's lines, so names and pronouns stay consistent across
++    # a chapter. The model returns new names / the summary on extra tagged lines, stripped before parsing.
++    # State lives on this (cached) translator instance, i.e. one run = one chapter. MANGATL_CONTEXT=0 disables.
++    def _mangatl_enabled(self):
++        return os.environ.get('MANGATL_CONTEXT', '1') == '1'
++
++    def _mangatl_state(self):
++        if not hasattr(self, '_mtl'):
++            self._mtl = {'names': {}, 'summary': '', 'prev': [], 'pages': 0}
++            # Resume: pick up the names/summary a previous (interrupted) run of this chapter saved.
++            saved = os.environ.get('MANGATL_CONTEXT_FILE')
++            if saved and os.path.exists(saved):
++                try:
++                    with open(saved, encoding='utf-8') as f:
++                        data = json.load(f)
++                    self._mtl.update({k: data[k] for k in ('names', 'summary', 'prev', 'pages') if k in data})
++                    self._mtl['prev'] = [tuple(x) for x in self._mtl['prev']]
++                    self.logger.info(f"[context] resumed from {saved}: {len(self._mtl['names'])} names, "
++                                     f"{self._mtl['pages']} pages")
++                except (OSError, ValueError) as e:
++                    self.logger.warning(f'[context] could not read {saved}: {e}')
++            path = os.environ.get('MANGATL_GLOSSARY')
++            if path and os.path.exists(path):
++                with open(path, encoding='utf-8') as f:
++                    self._mangatl_parse_names(f.read(), self._mtl['names'], override=True)
++        return self._mtl
++
++    def _mangatl_save(self):
++        path = os.environ.get('MANGATL_CONTEXT_FILE')
++        if not path:
++            return
++        try:
++            os.makedirs(os.path.dirname(path), exist_ok=True)
++            tmp = path + '.tmp'
++            with open(tmp, 'w', encoding='utf-8') as f:
++                json.dump(self._mangatl_state(), f, ensure_ascii=False, indent=1)
++            os.replace(tmp, path)  # atomic: a crash mid-write never leaves a broken file
++        except OSError as e:
++            self.logger.warning(f'[context] could not save {path}: {e}')
++
++    @staticmethod
++    def _mangatl_parse_names(text, names, override=False):
++        for pair in re.split(r'[;；\n]', text):
++            m = re.match(r'\s*([^=＝→#]+?)\s*(?:=|＝|→)\s*(.+?)\s*$', pair)
++            if not m:
++                continue
++            src, en = m.group(1).strip(), m.group(2).strip()
++            # First reading wins; glossary entries (override=True) replace whatever was there.
++            # Proper names only: English must be capitalised (drops common nouns like "lunch").
++            if (re.search(r'[\u3040-\u30ff\u3400-\u9fff]', src) and len(src) <= 12 and 0 < len(en) <= 40
++                    and en[0].isupper() and (override or src not in names)):
++                names[src] = en
++
++    def _mangatl_want_summary(self):
++        every = max(1, int(os.environ.get('MANGATL_SUMMARY_EVERY', '4')))
++        return self._mangatl_state()['pages'] % every == 0
++
++    def _mangatl_context_block(self):
++        st = self._mangatl_state()
++        parts = []
++        if st['summary']:
++            parts.append(f"Story so far: {st['summary']}")
++        if st['names']:
++            parts.append('Names already used (reuse exactly): ' + '; '.join(f'{k} = {v}' for k, v in st['names'].items()))
++        if st['prev']:
++            prev = '\n'.join(f'  {src} => {en}' for src, en in st['prev'])
++            parts.append('Previous page (already translated):\n' + prev[-1500:])
++        out = ''
++        if parts:
++            out += '\n\n## Chapter context (earlier pages; for consistency only, do not translate it)\n' + '\n'.join(parts)
++        out += ('\n\n## Extra output\nAfter the numbered translations, add one line starting with <|names|> listing every '
++                'proper name in this text (people, places, companies; not ordinary words, terms or sound effects) that '
++                'is not already listed above, as the name exactly as written '
++                'in the source text, "=", then the English you used. Example:\n'
++                '<|names|> 佐藤美咲=Sato Misaki; 高桥=Takahashi; 京都=Kyoto\n'
++                'If there are no new names, write: <|names|> none')
++        if self._mangatl_want_summary():
++            out += ('\nThen add one line: <|summary|> the story so far in at most 2 sentences, merging the existing '
++                    'summary with this text; say who is who (gender, relationships).')
++        return out
++
+     async def _request_translation(self, to_lang: str, prompt: str) -> str:
+-        messages = [{'role': 'system', 'content': self.chat_system_template.format(to_lang=to_lang)}]
++        system = self.chat_system_template.format(to_lang=to_lang)
++        if self._mangatl_enabled():
++            system += self._mangatl_context_block()
++        messages = [{'role': 'system', 'content': system}]
+ 
+         # Add chat samples if available
+         lang_chat_samples = self.get_chat_sample(to_lang)
+@@ -231,6 +337,10 @@ class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
+             max_tokens=self._MAX_TOKENS // 2,
+             temperature=self.temperature,
+             top_p=self.top_p,
++            # mangatl patch: hybrid-thinking models (e.g. qwen3.5) otherwise spend the
++            # whole max_tokens budget reasoning and return empty content.
++            **({'extra_body': {'reasoning_effort': os.environ['CUSTOM_OPENAI_REASONING_EFFORT']}}
++               if os.environ.get('CUSTOM_OPENAI_REASONING_EFFORT') else {}),
+         )
+ 
+         self.logger.debug('\n-- GPT Response (raw) --')

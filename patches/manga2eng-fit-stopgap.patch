@@ -1,0 +1,127 @@
+diff --git a/manga_translator/rendering/text_render_eng.py b/manga_translator/rendering/text_render_eng.py
+index 8ac0ba2..d3530f6 100644
+--- a/manga_translator/rendering/text_render_eng.py
++++ b/manga_translator/rendering/text_render_eng.py
+@@ -1,3 +1,4 @@
++import os
+ import cv2
+ import numpy as np
+ from PIL import Image
+@@ -333,6 +334,51 @@ def layout_lines_aligncenter(
+ 
+     return lines
+ 
++def _mangatl_merge_fragments(regions, original_img):
++    """mangatl patch: merge side-by-side vertical columns that belong to one bubble.
++
++    Conservative: both must be vertical, overlap vertically by half the shorter column, sit no further
++    apart than the narrower column's width, and have bright (bubble-white) pixels between them.
++    """
++    import functools
++    cached = [n for n, v in type(regions[0]).__dict__.items() if isinstance(v, functools.cached_property)] if regions else []
++    gray = cv2.cvtColor(original_img, cv2.COLOR_RGB2GRAY) if original_img.ndim == 3 else original_img
++    regions = list(regions)
++    merged = True
++    while merged:
++        merged = False
++        for i, a in enumerate(regions):
++            for j in range(i + 1, len(regions)):
++                b = regions[j]
++                ax1, ay1, ax2, ay2 = map(int, a.xyxy)
++                bx1, by1, bx2, by2 = map(int, b.xyxy)
++                aw, ah, bw, bh = ax2 - ax1, ay2 - ay1, bx2 - bx1, by2 - by1
++                if aw >= ah or bw >= bh:
++                    continue
++                gap = max(bx1 - ax2, ax1 - bx2)
++                overlap = min(ay2, by2) - max(ay1, by1)
++                if gap < 0 or gap > min(aw, bw) or overlap < 0.5 * min(ah, bh):
++                    continue
++                gx1, gx2 = (ax2, bx1) if ax2 <= bx1 else (bx2, ax1)
++                strip = gray[max(ay1, by1):min(ay2, by2), gx1:gx2]
++                if strip.size and strip.mean() < 200:
++                    continue
++                a.lines = np.concatenate([a.lines, b.lines])
++                for k in cached:
++                    a.__dict__.pop(k, None)
++                a.translation = f'{a.translation} {b.translation}'.strip()
++                a.font_size = max(a.font_size, b.font_size)
++                if os.environ.get('MANGATL_RENDER_DEBUG'):
++                    import sys
++                    print(f'[render-debug] merged fragment {[bx1, by1, bx2, by2]} into {[ax1, ay1, ax2, ay2]}', file=sys.stderr)
++                del regions[j]
++                merged = True
++                break
++            if merged:
++                break
++    return regions
++
++
+ def render_textblock_list_eng(
+     img: np.ndarray,
+     text_regions: List[TextBlock],
+@@ -376,6 +422,11 @@ def render_textblock_list_eng(
+ 
+     img_pil = Image.fromarray(img)
+ 
++    # mangatl patch: readable minimum font size (fraction of page width) and fragment merging.
++    min_font = max(1, round(img.shape[1] * float(os.environ.get('MANGATL_MIN_FONT_RATIO', '0.02'))))
++    if os.environ.get('MANGATL_MERGE_FRAGMENTS', '1') == '1' and original_img is not None:
++        text_regions = _mangatl_merge_fragments(text_regions, original_img)
++
+ 
+     # Initialize enlarge ratios
+     for region in text_regions:
+@@ -475,10 +526,35 @@ def render_textblock_list_eng(
+         lines_available = abs(xyxy[3] - xyxy[1]) // line_height + 1
+         font_size_multiplier = max(min(region_w / (base_length + 2*sw), lines_available / lines_needed), downscale_constraint)
+         # print(region.translation, font_size, font_size_multiplier, int(font_size * font_size_multiplier))
+-        if font_size_multiplier < 1:
+-            font_size = int(font_size * font_size_multiplier)
+-            font_size, sw, line_height, delimiter_len, base_length, word_lengths = calculate_font_values(font_size, words)
+-
++        target_font = int(font_size * font_size_multiplier) if font_size_multiplier < 1 else font_size
++        # mangatl patch: never go below a readable size (stock code could shrink to ~8px and draw nothing).
++        target_font = max(target_font, min_font)
++        if target_font != font_size:
++            font_size, sw, line_height, delimiter_len, base_length, word_lengths = calculate_font_values(target_font, words)
++
++        # mangatl patch: if the detected balloon is a sliver narrower than the longest word, lay out in a
++        # centred rectangle wide enough for it instead (text may spill slightly past a tiny bubble).
++        need_w = int(max(base_length + 2 * sw + 4, min_font * 6))
++        if not rotated and region_w < need_w:
++            pad = (need_w - region_w) // 2 + 1
++            xyxy = list(xyxy)
++            pad_l, pad_r = min(pad, int(xyxy[0])), min(pad, int(img.shape[1] - xyxy[2]))
++            ballon_mask = np.pad(ballon_mask, ((0, 0), (pad_l, pad_r)))
++            xyxy[0] -= pad_l
++            xyxy[2] += pad_r
++            cx = region_x + pad_l + region_w // 2
++            ballon_mask[:] = 0
++            ballon_mask[region_y:region_y + region_h, max(0, cx - need_w // 2):cx + need_w // 2 + 1] = 255
++            region_x, region_y, region_w, region_h = cv2.boundingRect(cv2.findNonZero(ballon_mask))
++
++        # mangatl patch: shrink until the laid-out text fits the balloon (10% slack), or hits the readable minimum.
++        for _ in range(40):
++            _tl = layout_lines_aligncenter(ballon_mask, words, word_lengths, delimiter_len, line_height, delimiter=delimiter)
++            _w = max(max(l.pos_x, 0) + l.length for l in _tl) - min(l.pos_x for l in _tl) + 2 * sw
++            _h = _tl[-1].pos_y - _tl[0].pos_y + line_height + 2 * sw
++            if (_h <= region_h * 1.1 and _w <= region_w * 1.1) or font_size <= min_font:
++                break
++            font_size, sw, line_height, delimiter_len, base_length, word_lengths = calculate_font_values(max(min_font, int(font_size * 0.9)), words)
+         textlines = layout_lines_aligncenter(ballon_mask, words, word_lengths, delimiter_len, line_height, delimiter=delimiter)
+ 
+         line_cy = np.array([line.pos_y for line in textlines]).mean() + line_height / 2
+@@ -532,6 +608,13 @@ def render_textblock_list_eng(
+         #     textlines_image = textlines_image.resize((int(textlines_image.width / resize_ratio), int(textlines_image.height / resize_ratio)))
+         abs_x = int(abs_cx - textlines_image.width / 2)
+         abs_y = int(abs_cy - textlines_image.height / 2)
++        if os.environ.get('MANGATL_RENDER_DEBUG'):
++            # mangatl patch: per-region render diagnostics
++            import sys
++            print(f'[render-debug] xyxy={list(map(int, region.xyxy))} lines={len(region.lines)} dir={region.direction} chars={len(region.translation)} '
++                  f'font={font_size} mult={font_size_multiplier:.2f} ballon_wh=({region_w},{region_h}) '
++                  f'paste=({abs_x},{abs_y}) size={textlines_image.size} img={img_pil.size} '
++                  f'fg={tuple(region_font_color)} stroke={tuple(region_stroke_color)}', file=sys.stderr)
+         img_pil.paste(textlines_image, (abs_x, abs_y), mask=textlines_image)
+         # cv2.imshow('ballon_region', ballon_region)
+         # cv2.imshow('cropped', original_img[xyxy[1]:xyxy[3], xyxy[0]:xyxy[2]])

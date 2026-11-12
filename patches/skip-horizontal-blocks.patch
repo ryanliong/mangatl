@@ -1,0 +1,19 @@
+diff --git a/manga_translator/manga_translator.py b/manga_translator/manga_translator.py
+index 2688eeb..d62e493 100644
+--- a/manga_translator/manga_translator.py
++++ b/manga_translator/manga_translator.py
+@@ -1338,6 +1338,14 @@ class MangaTranslator:
+                 elif config.filter_text and re.search(config.re_filter_text, region.translation):
+                     should_filter = True
+                     filter_reason = f"Matched filter text: {config.filter_text}"
++                elif (os.environ.get('MANGATL_SKIP_HBLOCKS', '1') == '1'
++                      and region.xywh[2] > region.xywh[3]
++                      and region.xywh[2] >= float(os.environ.get('MANGATL_SKIP_HBLOCK_MIN_WIDTH', '0.3')) * ctx.img_rgb.shape[1]):
++                    # mangatl patch: wide horizontally-written blocks are credits/contact details/afterwords, not
++                    # dialogue (vertical). Uses box shape: region.horizontal reflects the *render* direction, and
++                    # lines are already merged here. Filtering before mask refinement keeps the original text.
++                    should_filter = True
++                    filter_reason = f"Horizontal text block ({int(region.xywh[2])}x{int(region.xywh[3])}px)"
+                 elif not config.translator.translator == Translator.original:
+                     text_equal = region.text.lower().strip() == region.translation.lower().strip()
+                     if text_equal:
